@@ -105,6 +105,15 @@ def norm_dept(d):
     return d
 
 
+def hist_key_text(s):
+    """연도별 동일 전형·학과를 묶기 위한 키.
+    가운데점/공백/하이픈 같은 표기 차이는 무시하되 (야)/(주)/(인문)/(자연) 등
+    의미 있는 괄호 표기는 보존한다.
+    """
+    s = str(s or "").strip()
+    return re.sub(r"[\s・·ㆍ,\.\-_/]", "", s)
+
+
 def load_majors():
     txt = (DATA / "majors.js").read_text(encoding="utf-8")
     body = txt[txt.index("{"): txt.rindex("}") + 1]
@@ -114,13 +123,47 @@ def load_majors():
     return m, rules, fb
 
 
+MAJOR_PART = re.compile(r"[\(\s]([^()\s,]+전공)\)?\s*$")
+
+
 def classify(dept, rules, fb, src_cat=None):
-    for gid, rx in rules:
-        if rx.search(dept):
-            return gid
+    """학부 안의 세부 전공이 적혀 있으면 전공명을 먼저 분류한다.
+    예) 기계전기공학부 기계공학전공 → '기계공학전공' 기준 → mech"""
+    m = MAJOR_PART.search(dept)
+    targets = [m.group(1), dept] if m else [dept]
+    for t in targets:
+        for gid, rx in rules:
+            if rx.search(t):
+                return gid
     if src_cat and src_cat in fb:
         return fb[src_cat]
     return None
+
+
+# 학과명 키워드 ↔ 기대 학과군 (교육·자유전공은 의도적으로 예외)
+SANITY = [
+    (r"전기|전자", "elec", ("elec", "cs", "edu_sci", "edu_hum", "free", "mech", "chem")),
+    (r"기계", "mech", ("mech", "edu_sci", "free", "elec", "ind", "agri", "bio")),
+    (r"건축", "arch", ("arch", "edu_sci", "free")),
+    (r"간호", "nursing", ("nursing", "free")),
+    (r"컴퓨터|소프트웨어", "cs", ("cs", "edu_sci", "free", "elec", "art_design")),
+]
+STRICT = [  # 이 조합이면 반드시 이 학과군이어야 함
+    (r"^전기전자|^전자전기|^전기・전자|^전기ㆍ전자", "elec"),
+    (r"기계.*디자인|모빌리티디자인", "mech"),
+    (r"건축.*디자인|실내건축", "arch"),
+]
+
+
+def sanity(dept, grp):
+    probs = []
+    for pat, want in STRICT:
+        if re.search(pat, dept) and grp != want and not MAJOR_PART.search(dept) and "교육" not in dept:
+            probs.append(f"{dept}→{grp}(기대 {want})")
+    for pat, want, ok in SANITY:
+        if re.search(pat, dept) and grp not in ok:
+            probs.append(f"{dept}→{grp}(참고 {want})")
+    return probs
 
 
 def num(v):
@@ -162,6 +205,33 @@ def build_national(xlsx, min_year, rules, fb, report):
             if len(vals) >= 2 and isinstance(vals[-1], int):
                 check.add((str(vals[-2]).strip(), vals[-1]))
 
+    # 원자료의 '대학링크' 시트: 대학어디가/입학처/대학발표 입결 링크를 함께 제공
+    links = {}
+    if "대학링크" in wb.sheetnames:
+        for r in wb["대학링크"].iter_rows(min_row=3, values_only=True):
+            if not r or not r[0]:
+                continue
+            nm = str(r[0]).strip()
+            links[nm] = {
+                "adiga2027": r[1] if len(r) > 1 and isinstance(r[1], str) and r[1].startswith("http") else None,
+                "adiga2026": r[2] if len(r) > 2 and isinstance(r[2], str) and r[2].startswith("http") else None,
+                "admission": r[3] if len(r) > 3 and isinstance(r[3], str) and r[3].startswith("http") else None,
+                "result": r[4] if len(r) > 4 and isinstance(r[4], str) and r[4].startswith("http") else None,
+            }
+    links = {k: v for k, v in links.items() if any(v.values())}
+    # 링크 시트와 입결 DB의 캠퍼스 표기가 다른 소수 대학 보정
+    if "중앙대2캠" in links:
+        z = dict(links["중앙대2캠"])
+        if "중앙대" in links:
+            z["admission"] = z.get("admission") or links["중앙대"].get("admission")
+            z["result"] = z.get("result") or links["중앙대"].get("result")
+        links["중앙대(다빈치)"] = z
+    if "홍익대" in links:
+        # 세종캠퍼스는 같은 공식 입학처에서 안내되므로 입학처 링크만 안전하게 공유
+        links["홍익대(세)"] = {"adiga2027": None, "adiga2026": None,
+                             "admission": links["홍익대"].get("admission"),
+                             "result": links["홍익대"].get("result")}
+
     units = {}
     excluded, dropped = Counter(), Counter()
     for row in it:
@@ -179,8 +249,15 @@ def build_national(xlsx, min_year, rules, fb, report):
         if re.search(r"재외국민|특별전형|목회자|추천자|보훈|평생학습|만학|^일반학생$", dept_raw):
             excluded[dept_raw] += 1
             continue
-        key = (g("대학"), g("교과/종합"), adm, dept_raw)
-        u = units.setdefault(key, {"years": defaultdict(list), "region_raw": g("지역"), "track": g("인문/자연"), "cat": g("소계열")})
+        # 최근 3개년 추이를 안정적으로 연결하기 위해 표기부호 차이는 같은 모집단위로 묶는다.
+        # 단, (야)/(주)/(인문)/(자연) 같은 의미 있는 표기는 hist_key_text가 보존한다.
+        key = (g("대학"), g("교과/종합"), hist_key_text(adm), hist_key_text(dept_raw))
+        u = units.setdefault(key, {"years": defaultdict(list), "region_raw": g("지역"), "track": g("인문/자연"), "cat": g("소계열"),
+                                   "dept_by_year": defaultdict(list), "adm_by_year": defaultdict(list)})
+        if dept_raw not in u["dept_by_year"][year]:
+            u["dept_by_year"][year].append(dept_raw)
+        if adm not in u["adm_by_year"][year]:
+            u["adm_by_year"][year].append(adm)
         rec = (num(g("등급50")), num(g("등급70")), g("모집인원"), num(g("경쟁률")), g("추합"))
         if rec not in u["years"][year]:          # 완전히 같은 중복 행은 1건으로
             u["years"][year].append(rec)
@@ -196,11 +273,16 @@ def build_national(xlsx, min_year, rules, fb, report):
             return max(g50, g70), "rev"           # 50%·70% 역전 → 더 보수적인 값 사용
         return g70, "ok"
 
-    rows, unmapped = [], Counter()
-    for (uni, typ, adm, dept), u in units.items():
+    rows, unmapped, suspicious = [], Counter(), Counter()
+    for (uni, typ, _adm_key, _dept_key), u in units.items():
+        # 학과군 분류는 가장 최근 연도의 실제 표기를 기준으로 한다.
+        latest_name_year = max(u["dept_by_year"])
+        dept = u["dept_by_year"][latest_name_year][0]
         grp = classify(dept, rules, fb, u["cat"])
         if grp is None:
             unmapped[dept] += 1
+        for pr in sanity(dept, grp):
+            suspicious[pr] += 1
         good = {}
         for yy, recs in u["years"].items():
             ok = []
@@ -218,6 +300,9 @@ def build_national(xlsx, min_year, rules, fb, report):
         y = max(good)
         if y < min_year:
             continue
+        # 화면에는 실제 비교 기준인 최신 공개연도의 명칭을 사용한다.
+        dept = (u["dept_by_year"].get(y) or [dept])[0]
+        adm = (u["adm_by_year"].get(y) or [""])[0]
         region_raw = str(u["region_raw"] or "")
         region = REGION_MAP.get(region_raw) or ("수도권" if region_raw.startswith("서울") else "기타")
         cands = good[y]
@@ -252,18 +337,25 @@ def build_national(xlsx, min_year, rules, fb, report):
     meta = {
         "source": "대학어디가 2023~2026 수시 입결 (남악고 김현석 선생님 정리 자료 ver0702)",
         "cut_type": "대학어디가 공개 최종등록자 교과등급 70%컷 (원자료 열: 등급70)",
-        "note": ("최근 공개연도의 70%컷을 비교값으로 사용. 실기·논술·특별전형(기회균형·농어촌 등) 제외. "
-                 "50%컷이 70%컷보다 큰 역전 자료는 더 큰 값(보수적)을 사용, 1.00으로 채워진 비공개 추정값은 제외, "
-                 "같은 이름의 모집단위가 모집인원만 다르게 2개 이상 있으면 따로 표시."),
+        "note": ("기본 비교는 모집단위별 최근 공개연도의 70%컷을 사용하고, 화면에는 2024~2026 최근 3개년 70%컷을 함께 표시. "
+                 "실기·논술·특별전형(기회균형·농어촌 등) 제외. 50%컷이 70%컷보다 큰 역전 자료는 더 큰 값(보수적)을 사용, "
+                 "1.00으로 채워진 비공개 추정값은 제외. 가운데점·공백 등 표기만 다른 동일 전형·학과는 연도 추이를 연결하되 "
+                 "(야)/(주)/(인문)/(자연) 등 의미 있는 구분은 보존."),
         "min_year": min_year,
+        "links": links,
         "built_at": datetime.date.today().isoformat(),
         "count": len(rows),
         "check_list": sorted(f"{a}({b})" for a, b in check),
+        "diag": {"excluded_special": sum(excluded.values()), "placeholder_dropped": dropped["placeholder"],
+                 "rev_fixed": dropped["rev"], "dup_split_keys": dropped["dup_units"], "suspicious": len(suspicious)},
     }
     if report:
         print(f"\n[전국] 모집단위 {len(rows)}개 · 특별전형 제외 {sum(excluded.values())}건")
         print(f"[전국] 1.00 채움값 제외 {dropped['placeholder']}건 · 50/70 역전 보정 {dropped['rev']}건 · 동명 모집단위 분리 {dropped['dup_units']}건 · 확인필요 대학 {sorted(check)}")
         print(f"[전국] 미분류 학과 {len(unmapped)}개:", ", ".join(k for k, _ in unmapped.most_common(80)))
+        print(f"[전국] 의심 분류 {len(suspicious)}개 (학과명 키워드와 학과군 불일치 — 검토 후 majors.js 규칙 보완):")
+        for k, _ in suspicious.most_common(60):
+            print("   ", k)
     return {"meta": meta, "cols": cols, "rows": rows}, {r[1] for r in rows}, {r[1]: r[2] for r in rows}
 
 
@@ -280,12 +372,15 @@ def build_cases(json_path, rules, fb, nat_unis, nat_region, report):
         key = (uni, TYPE[r["type"]], norm_dept(dept))
         m = merged.setdefault(key, {"uni": uni, "full": r["uni"], "campus": r.get("campus") or "", "dept": dept,
                                     "type": TYPE[r["type"]], "cluster": r.get("cluster"), "n": 0, "adm": 0,
-                                    "schools": set(), "years": set(), "hasMin": False, "minText": "",
+                                    "schools": set(), "by": {"경일고": [0, 0], "경일여고": [0, 0]}, "years": set(), "hasMin": False, "minText": "",
                                     "core": [], "all": []})
         adm = (r.get("first") or 0) + (r.get("wait") or 0)
         m["n"] += r.get("n") or 0
         m["adm"] += adm
-        m["schools"].add("경일고" if r.get("school") == "남고" else "경일여고")
+        sch = "경일고" if r.get("school") == "남고" else "경일여고"
+        m["schools"].add(sch)
+        m["by"][sch][0] += r.get("n") or 0
+        m["by"][sch][1] += adm
         m["years"].update(r.get("years") or [])
         m["hasMin"] = m["hasMin"] or bool(r.get("hasMin"))
         if r.get("minText") and not m["minText"]:
@@ -302,7 +397,7 @@ def build_cases(json_path, rules, fb, nat_unis, nat_region, report):
         w = sum(b for _, b in pairs)
         return round(sum(a * b for a, b in pairs) / w, 2)
 
-    rows, unmatched, unmapped = [], Counter(), Counter()
+    rows, unmatched, unmapped, suspicious = [], Counter(), Counter(), Counter()
     for (uni, typ, dn), m in sorted(merged.items()):
         region = nat_region.get(uni) or CAMPUS_REGION.get(m["campus"]) or UNI_REGION_EXTRA.get(uni) or "기타"
         if uni not in nat_unis:
@@ -312,16 +407,19 @@ def build_cases(json_path, rules, fb, nat_unis, nat_region, report):
             unmapped[m["dept"]] += 1
         rows.append([uni, region, typ, m["dept"], dn, grp or "etc", m["n"], m["adm"],
                      sorted(m["schools"]), sorted(m["years"]), 1 if m["hasMin"] else 0, m["minText"],
-                     wmean(m["core"]), wmean(m["all"])])
+                     wmean(m["core"]), wmean(m["all"]), [m["by"]["경일고"], m["by"]["경일여고"]]])
+        for pr in sanity(m["dept"], grp or "etc"):
+            suspicious[pr] += 1
     for i, r in enumerate(rows):
         r.insert(0, i + 1)
     cols = ["id", "uni", "region", "type", "dept", "deptNorm", "group", "applied", "admitted",
-            "schools", "years", "hasMin", "minText", "cmpCore", "cmpAll"]
+            "schools", "years", "hasMin", "minText", "cmpCore", "cmpAll", "bySchool"]
     meta = {
         "source": "경일 수시나침반 공개 데이터(public_data.json) — 창원경일고·창원경일여고 수시 지원 기록",
         "years": sorted({y for r in rows for y in r[10]}),
         "grade_scale": "9등급제 (cmpCore=국영수사과, cmpAll=전교과, 합격자 중앙값의 합격자 수 가중 평균)",
         "coverage_note": "학생부교과·학생부종합만 포함. 사례 수 5건 미만은 화면에서 건수를 표시하지 않습니다.",
+        "unmatched_unis": sorted(unmatched),
         "built_at": datetime.date.today().isoformat(),
         "count": len(rows),
     }
@@ -329,6 +427,7 @@ def build_cases(json_path, rules, fb, nat_unis, nat_region, report):
         print(f"\n[경일] 모집단위 {len(rows)}개 (지원 {sum(r[7] for r in rows)}건)")
         print(f"[경일] 전국 DB에 없는 대학명 {len(unmatched)}개:", ", ".join(unmatched))
         print(f"[경일] 미분류 학과 {len(unmapped)}개:", ", ".join(unmapped))
+        print(f"[경일] 의심 분류 {len(suspicious)}개:", ", ".join(list(suspicious)[:40]))
     return {"meta": meta, "cols": cols, "rows": rows}
 
 
