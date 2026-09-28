@@ -218,6 +218,39 @@ def build_national(xlsx, min_year, rules, fb, report):
                 "admission": r[3] if len(r) > 3 and isinstance(r[3], str) and r[3].startswith("http") else None,
                 "result": r[4] if len(r) > 4 and isinstance(r[4], str) and r[4].startswith("http") else None,
             }
+    # 대학 발표 입결 링크는 원자료에 오기입이 있을 수 있어 도메인을 보수적으로 검증한다.
+    # 같은 대학 공식 도메인이거나, 아래 예외처럼 대학이 실제로 쓰는 별도 결과시스템인 경우만 노출한다.
+    from urllib.parse import urlparse
+    RESULT_CROSS_DOMAIN_OK = {
+        "광주교대": {"gjue.ac.kr"},
+        "국립경국대": {"gknu.ac.kr"},
+        "국민대": {"u-is.co.kr"},
+        "한신대": {"u-is.co.kr"},
+        "협성대": {"u-is.co.kr"},
+    }
+    def base_domain(url):
+        try:
+            host=(urlparse(url).hostname or "").lower()
+        except Exception:
+            return ""
+        ps=host.split(".")
+        if len(ps)>=3 and ps[-2:] in (["ac","kr"],["co","kr"],["go","kr"],["or","kr"]):
+            return ".".join(ps[-3:])
+        return ".".join(ps[-2:]) if len(ps)>=2 else host
+    def valid_result_link(name, item):
+        res=item.get("result")
+        if not res:
+            return False
+        adm=item.get("admission")
+        rb=base_domain(res)
+        if adm and rb==base_domain(adm):
+            return True
+        return rb in RESULT_CROSS_DOMAIN_OK.get(name,set())
+    bad_result_links=[]
+    for nm, item in links.items():
+        if item.get("result") and not valid_result_link(nm,item):
+            bad_result_links.append(nm)
+            item["result"]=None
     links = {k: v for k, v in links.items() if any(v.values())}
     # 링크 시트와 입결 DB의 캠퍼스 표기가 다른 소수 대학 보정
     if "중앙대2캠" in links:
@@ -234,6 +267,7 @@ def build_national(xlsx, min_year, rules, fb, report):
 
     units = {}
     excluded, dropped = Counter(), Counter()
+    placeholder_items = []
     for row in it:
         g = lambda k: row[idx[k]]
         if not g("대학") or g("수시/정시") != "수시" or g("교과/종합") not in ("교과", "종합"):
@@ -270,7 +304,7 @@ def build_national(xlsx, min_year, rules, fb, report):
         if g70 == 1 and g50 in (None, 1) and grp not in ("med_doc", "pharm"):
             return None, "placeholder"           # 비공개를 1.00으로 채운 것으로 보이는 값
         if g50 is not None and g70 + 0.005 < g50:
-            return max(g50, g70), "rev"           # 50%·70% 역전 → 더 보수적인 값 사용
+            return g70, "rev"                     # 50%·70% 역전 → 원자료 70%컷 유지 + 확인 경고
         return g70, "ok"
 
     rows, unmapped, suspicious = [], Counter(), Counter()
@@ -291,6 +325,7 @@ def build_national(xlsx, min_year, rules, fb, report):
                 if v is None:
                     if why == "placeholder":
                         dropped["placeholder"] += 1
+                        placeholder_items.append(f"{uni} · {yy} · {dept}")
                     continue
                 ok.append((rec, v, why))
             if ok:
@@ -337,21 +372,23 @@ def build_national(xlsx, min_year, rules, fb, report):
     meta = {
         "source": "대학어디가 2023~2026 수시 입결 (남악고 김현석 선생님 정리 자료 ver0702)",
         "cut_type": "대학어디가 공개 최종등록자 교과등급 70%컷 (원자료 열: 등급70)",
-        "note": ("기본 비교는 모집단위별 최근 공개연도의 70%컷을 사용하고, 화면에는 2024~2026 최근 3개년 70%컷을 함께 표시. "
-                 "실기·논술·특별전형(기회균형·농어촌 등) 제외. 50%컷이 70%컷보다 큰 역전 자료는 더 큰 값(보수적)을 사용, "
-                 "1.00으로 채워진 비공개 추정값은 제외. 가운데점·공백 등 표기만 다른 동일 전형·학과는 연도 추이를 연결하되 "
-                 "(야)/(주)/(인문)/(자연) 등 의미 있는 구분은 보존."),
+        "note": ("기본 비교는 모집단위별 최근 공개연도의 원자료 70%컷을 사용하고, 화면에는 2024~2026 최근 공개 입결을 함께 표시. "
+                 "실기·논술·특별전형(기회균형·농어촌 등) 제외. 50%컷이 70%컷보다 큰 역전 자료도 값을 임의 보정하지 않고 "
+                 "원자료 70%컷을 유지하며 확인 필요 경고를 표시. 1.00으로 채워진 비공개 추정값은 제외. "
+                 "가운데점·공백 등 표기만 다른 동일 전형·학과는 연도 추이를 연결하되 (야)/(주)/(인문)/(자연) 등 의미 있는 구분은 보존."),
         "min_year": min_year,
         "links": links,
         "built_at": datetime.date.today().isoformat(),
         "count": len(rows),
         "check_list": sorted(f"{a}({b})" for a, b in check),
         "diag": {"excluded_special": sum(excluded.values()), "placeholder_dropped": dropped["placeholder"],
-                 "rev_fixed": dropped["rev"], "dup_split_keys": dropped["dup_units"], "suspicious": len(suspicious)},
+                 "rev_flagged": dropped["rev"], "dup_split_keys": dropped["dup_units"], "suspicious": len(suspicious),
+                 "result_links_rejected": sorted(bad_result_links),
+                 "placeholder_items": sorted(set(placeholder_items))},
     }
     if report:
         print(f"\n[전국] 모집단위 {len(rows)}개 · 특별전형 제외 {sum(excluded.values())}건")
-        print(f"[전국] 1.00 채움값 제외 {dropped['placeholder']}건 · 50/70 역전 보정 {dropped['rev']}건 · 동명 모집단위 분리 {dropped['dup_units']}건 · 확인필요 대학 {sorted(check)}")
+        print(f"[전국] 1.00 채움값 제외 {dropped['placeholder']}건 · 50/70 역전 경고 {dropped['rev']}건 · 동명 모집단위 분리 {dropped['dup_units']}건 · 확인필요 대학 {sorted(check)}")
         print(f"[전국] 미분류 학과 {len(unmapped)}개:", ", ".join(k for k, _ in unmapped.most_common(80)))
         print(f"[전국] 의심 분류 {len(suspicious)}개 (학과명 키워드와 학과군 불일치 — 검토 후 majors.js 규칙 보완):")
         for k, _ in suspicious.most_common(60):

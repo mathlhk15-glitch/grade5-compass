@@ -293,7 +293,7 @@ footer{font-size:11.5px;color:var(--muted);text-align:center;margin-top:6px;line
 </details>
 
 <footer>
-  창원경일고등학교 진로진학상담부 · v1.1 (2026.09) · 2028 대입 결과로 첫 검증 예정<br>
+  창원경일고등학교 진로진학상담부 · v1.3 (2026.09) · 2028 대입 결과로 첫 검증 예정<br>
   학생 개인정보를 저장하거나 전송하지 않습니다. 입력값은 이 화면 안에서만 계산됩니다.
 </footer>
 </div>
@@ -579,13 +579,17 @@ function history3(u){
 function historyHTML(u){
   const hs=history3(u);
   if (!hs.length) return '';
+  const n=hs.filter(([,v])=>v!=null).length;
+  if (!n) return '';
   const vals=hs.map(([y,v])=>`<span>${y} <b>${v==null?'—':f2(v)}</b></span>`).join(' · ');
-  return `<div class="hist">최근 3개년 70%컷 · ${vals}<br><span style="color:var(--muted)">※ 대학·전형·모집단위가 연도별로 동일하게 연결되는 경우에 표시</span></div>`;
+  const label=n>=3?'최근 3개년 입결':n===2?'최근 공개 입결 2개년':'확인 가능한 최근 입결 1개년';
+  return `<div class="hist">${label} · ${vals}<br><span style="color:var(--muted)">※ 기본 비교는 가장 최근 공개 70%컷을 사용합니다. 연도별 동일 대학·전형·모집단위로 연결되는 값만 표시합니다.</span></div>`;
 }
 function officialLinks(u){
   const x=UNIV_LINKS[u.uni]||{};
   const parts=[];
   if (x.admission) parts.push(`<a href="${esc(x.admission)}" target="_blank" rel="noopener">입학처</a>`);
+  if (x.result) parts.push(`<a href="${esc(x.result)}" target="_blank" rel="noopener">대학 발표 입결</a>`);
   const adiga=x.adiga2026||x.adiga2027;
   if (adiga) parts.push(`<a href="${esc(adiga)}" target="_blank" rel="noopener">대학어디가</a>`);
   return parts.length?`<div class="links">${parts.join('')}</div>`:'';
@@ -614,7 +618,7 @@ function cardHTML(it){
   else if (similar.length) badges += `<span class="b gys">🏫 같은 대학 유사 학과 경일 사례</span>`;
 
   let cut;
-  if (isNat) cut = `${u.year}학년도 70%컷 <b>${f2(u.cut)}</b>${fl.includes('rev')?' <span style="color:var(--muted)">(원자료 50·70% 역전 → 큰 값 사용)</span>':''}`;
+  if (isNat) cut = `${u.year}학년도 70%컷 <b>${f2(u.cut)}</b>${fl.includes('rev')?' <span style="color:var(--muted)">(원자료 50·70% 순서 확인 필요 · 70%컷 원값 유지)</span>':''}`;
   else cut = (u.admitted>=CONFIG.caseCmpMin) ? `경일 선배 합격자 중심값 <b>${f2(it.v)}</b> (9등급·${st.basis==='core'?'국영수사과':'전교과'}) · 공식 입결 아님` : `경일 선배 소수 합격 사례 기준 · 공식 입결 아님`;
 
   const where = it.v<st.pos.jLo?'가깝지만 조금 더 좋은 성적 쪽에':it.v>st.pos.jHi?'가깝지만 조금 더 낮은 성적 쪽에':'겹치거나 매우 가까운 곳에';
@@ -630,7 +634,7 @@ function cardHTML(it){
     const sl = schoolLine(direct || (!isNat?u:null));
     if (isNat){
       const h = history3(u).map(([y,v])=>`${y}: ${v==null?'—':f2(v)}`).join(' · ');
-      teacher = `<div class="teacher">모집 ${u.recruit??'-'} · 경쟁률 ${u.comp??'-'} · 충원 ${u.extra??'-'} · 원자료 50%컷 ${f2(u.g50)} · 70%컷 ${f2(u.g70)} · 비교값 ${f2(u.cut)} · ${esc(u.track)}<br>최근 3개년 70%컷 ${h||'-'} · 내 중심값과 차이 ${(u.cut-st.pos.center>=0?'+':'')}${(u.cut-st.pos.center).toFixed(2)}${u.flags?` · 점검표시 ${esc(u.flags)}`:''}${sl?`<br>학교별: ${sl}`:''}</div>`;
+      teacher = `<div class="teacher">모집 ${u.recruit??'-'} · 경쟁률 ${u.comp??'-'} · 충원 ${u.extra??'-'} · 원자료 50%컷 ${f2(u.g50)} · 70%컷 ${f2(u.g70)} · 비교값 ${f2(u.cut)} · ${esc(u.track)}<br>최근 공개 입결 ${h||'-'} · 내 중심값과 차이 ${(u.cut-st.pos.center>=0?'+':'')}${(u.cut-st.pos.center).toFixed(2)}${u.flags?` · 점검표시 ${esc(u.flags)}`:''}${sl?`<br>학교별: ${sl}`:''}</div>`;
     } else {
       teacher = `<div class="teacher">경일 ${showN(u.applied)?`지원 ${u.applied} · 합격 ${u.admitted}`:'소수 사례'} · 연도 ${u.years.join('·')}${sl?` · 학교별: ${sl}`:''}${u.minText?` · 최저: ${esc(u.minText)}`:''}</div>`;
     }
@@ -649,6 +653,7 @@ function cardHTML(it){
       ${!direct&&similar.length?similarCaseHTML(similar):''}
       ${u.regional?'<p>📍 지역인재 전형은 부울경 권역이라도 대학·연도별 지원 자격이 다를 수 있습니다. 반드시 해당 학년도 모집요강의 고교 소재지·재학기간 등 자격을 확인하세요.</p>':''}
       ${fl.includes('dup')?'<p>⚠ 원자료에 같은 이름의 모집단위가 모집인원만 다르게 2개 이상 있습니다(캠퍼스·세부 모집단위 차이로 추정). 모집요강에서 어떤 단위인지 확인하세요.</p>':''}
+      ${fl.includes('rev')?`<p>⚠ 원자료에서 50%컷(${f2(u.g50)})이 70%컷(${f2(u.g70)})보다 크게 기록되어 일반적인 순서와 다릅니다. 프로그램은 값을 임의 교정하지 않고 <b>원자료 70%컷 ${f2(u.g70)}</b>을 그대로 사용했습니다. 대학 발표 입결을 확인하세요.</p>`:''}
       ${fl.includes('chk')?`<p>⚠ 원자료 정리자가 ${u.year}학년도 이 대학 자료를 &lsquo;확인 필요&rsquo;로 표시했습니다. 대학 발표 입결과 한 번 더 대조하세요.</p>`:''}
       ${direct&&direct.hasMin?`<p>📝 경일 선배가 지원한 전형 중 수능최저가 있던 기록이 있습니다${direct.minText?`: ${esc(direct.minText.replace(/^[*\s]+/,''))}`:''}. 지금 보고 있는 전형의 최저 여부는 모집요강에서 확인하세요.</p>`:'<p>📝 수능최저 여부는 이 자료에 없으므로 모집요강에서 확인하세요.</p>'}
       ${u.type==='종합'?'<p>📘 학생부종합은 내신 범위가 비슷해도 과목 선택·세특·활동·면접 등을 함께 평가합니다. 내신만으로 판단하지 마세요.</p>':''}
@@ -723,7 +728,7 @@ function renderFav(){
   if (!list.length){ sec.classList.add('hide'); return; }
   sec.classList.remove('hide');
   $('favCount').textContent = list.length;
-  $('favTable').innerHTML = `<table class="dt"><tr><th>대학·학과</th><th>전형</th><th>기본 비교</th><th>최근 3개년 70%컷</th><th>경일 사례</th><th></th></tr>`+
+  $('favTable').innerHTML = `<table class="dt"><tr><th>대학·학과</th><th>전형</th><th>기본 비교</th><th>최근 공개 입결</th><th>경일 사례</th><th></th></tr>`+
     list.map(s=>`<tr><td><b>${esc(s.uni)}</b> ${esc(s.dept)}<br><small style="color:var(--muted)">${esc(s.region)}</small></td><td>${esc(s.type)}<br><small>${esc(s.adm)}</small></td><td>${esc(s.val)}</td><td>${esc(s.hist||'-')}</td><td>${esc(s.gy||'-')}</td><td><button class="pill" onclick='removeFav(${esc(JSON.stringify(s.k))})'>삭제</button></td></tr>`).join('')+`</table>`;
 }
 
@@ -790,7 +795,7 @@ $('q').addEventListener('change',()=>{ if ($('q').value.trim()) doSearch(); });
   const um = window.UNIVERSITIES.meta, cm = window.GYEONGIL_CASES.meta;
   $('srcInfo').innerHTML = `
     <h4>내 위치</h4><ul><li>${esc(B.source)}</li><li>${esc(G.source)}</li></ul>
-    <h4>전국 대학 입결 (우선 사용)</h4><ul><li>${esc(um.source)}</li><li>${esc(um.cut_type)}</li><li>${esc(um.note)}</li><li>모집단위 ${um.count.toLocaleString()}개 · 데이터 정리일 ${esc(um.built_at)}</li></ul>
+    <h4>전국 대학 입결 (우선 사용)</h4><ul><li>${esc(um.source)}</li><li>${esc(um.cut_type)}</li><li>${esc(um.note)}</li><li>최근 ${um.min_year}학년도 이상 공개 입결이 확인되는 모집단위를 기본 탐색 대상으로 사용 · 모집단위 ${um.count.toLocaleString()}개 · 데이터 정리일 ${esc(um.built_at)}</li></ul>
     <h4>경일 선배 사례 (강조 표시)</h4><ul><li>${esc(cm.source)}</li><li>${cm.years.join('·')}학년도 · 모집단위 ${cm.count.toLocaleString()}개 · ${esc(cm.coverage_note)}</li></ul>
     <h4>입력 기준</h4><ul><li>빠르게 보기는 국영수사과 평균 기준(경기 자료 중심값)입니다. 자세히 보기에서 전과목 평균(부산 자료 중심값)으로 바꿀 수 있습니다. 두 자료는 항상 교차 참고 범위로 함께 사용합니다.</li></ul>`;
 })();
@@ -811,10 +816,11 @@ $('q').addEventListener('change',()=>{ if ($('q').value.trim()) doSearch(); });
     <tr><td>미분류 학과</td><td>${etc}</td></tr>
     <tr><td>의심 분류(빌드 점검)</td><td>${d.suspicious??'-'}</td></tr>
     <tr><td>특별전형 제외</td><td>${d.excluded_special??'-'}건</td></tr>
-    <tr><td>1.00 채움값 제외</td><td>${d.placeholder_dropped??'-'}건</td></tr>
-    <tr><td>50·70% 역전 보정</td><td>${flags.rev||0}개 모집단위</td></tr>
+    <tr><td>1.00 채움값 제외</td><td>${d.placeholder_dropped??'-'}건${(d.placeholder_items||[]).length?` <details><summary>목록 보기</summary><div style="max-height:180px;overflow:auto;text-align:left">${(d.placeholder_items||[]).map(x=>esc(x)).join('<br>')}</div></details>`:''}</td></tr>
+    <tr><td>50·70% 순서 확인 경고</td><td>${flags.rev||0}개 모집단위 · 원자료 70%컷 유지</td></tr>
     <tr><td>동명 모집단위 분리</td><td>${flags.dup||0}개 (원자료 ${d.dup_split_keys??'-'}건)</td></tr>
     <tr><td>확인필요 대학 표시</td><td>${flags.chk||0}개 · ${esc((um.check_list||[]).join(', '))}</td></tr>
+    <tr><td>검증에서 제외한 대학 발표 입결 링크</td><td>${esc(((d.result_links_rejected||[]).join(', '))||'-')}</td></tr>
     <tr><td>같은 키(대학·전형·학과 정규화) 중복</td><td>${sameKey}개 — (야)/(주)/(인문)/(자연) 구분 모집단위 및 동명 분리 포함, 화면에는 원래 학과명으로 구분 표시</td></tr>
     <tr><td>경일 사례 모집단위</td><td>${CASES.length.toLocaleString()} · 전국 입결과 직접 연결 ${linked} · 별도 목록 대상 ${CASE_ONLY.length}</td></tr>
     <tr><td>전국 DB에 없는 경일 대학명</td><td>${esc((cm.unmatched_unis||[]).join(', '))||'-'}</td></tr>
